@@ -1,27 +1,80 @@
+
 #!/usr/bin/env python3
-"""Payment reconciliation.
 
-Reads payments.jsonl and works out how much money we actually collected.
-Run:  python3 reconcile.py
-"""
+"""Reconcile payment attempts and print the verification code."""
+
 import json
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
 
-total = 0.0
-count = 0
 
-with open("payments.jsonl") as f:
-    for line in f:
-        event = json.loads(line)
-        if event["status"] == "success":
-            total += float(event["amount"])
-            count += 1
+def parse_timestamp(value):
+    """Parse an ISO timestamp, including UTC timestamps ending in Z."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
-with open("expected.txt") as f:
-    expected = int(f.read().strip())
 
-if count != expected:
-    print(f"Check failed: counted {count} successful payments, expected {expected}.")
-    print("Something in the data isn't being handled the way the README describes.")
-else:
+def reconcile():
+    base_dir = Path(__file__).resolve().parent
+    payments_file = base_dir / "payments.jsonl"
+    expected_file = base_dir / "expected.txt"
+
+    latest_by_transaction = {}
+
+    with payments_file.open("r", encoding="utf-8") as file:
+        for line in file:
+            try:
+                event = json.loads(line)
+
+                txn_id = event.get("txn_id")
+                if not txn_id:
+                    continue
+
+                timestamp = parse_timestamp(event["ts"])
+
+                previous = latest_by_transaction.get(txn_id)
+
+                if (
+                    previous is None
+                    or timestamp >= previous["_parsed_ts"]
+                ):
+                    event["_parsed_ts"] = timestamp
+                    latest_by_transaction[txn_id] = event
+
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+
+    successful_payments = [
+        event
+        for event in latest_by_transaction.values()
+        if event.get("status") == "success"
+    ]
+
+    total = sum(
+        (
+            Decimal(str(event["amount"]).replace(",", "").strip())
+            for event in successful_payments
+        ),
+        Decimal("0"),
+    )
+
+    count = len(successful_payments)
+    expected = int(expected_file.read_text(encoding="utf-8").strip())
+
+    if count != expected:
+        print(
+            f"Check failed: counted {count} successful payments, "
+            f"expected {expected}."
+        )
+        print(
+            "Check the event parsing and latest-attempt logic "
+            "before submitting."
+        )
+        return
+
     print(f"Check passed: {count} successful payments.")
     print(f"Your code: KOYA-{round(total)}")
+
+
+if __name__ == "__main__":
+    reconcile()
